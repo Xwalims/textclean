@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: [20, 22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No install step: textclean has zero dependencies, so `node --test` is
+      # the entire build.
+      - name: Run tests
+        run: node --test
+
+      - name: textclean checks its own repository
+        run: node bin/textclean.js . --check --eol lf --strip-bom --strip-trailing-whitespace --ensure-final-newline
