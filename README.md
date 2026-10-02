@@ -13,6 +13,26 @@ Requires Node 20 or newer.
 
 ---
 
+<!-- hero -->
+
+[![CI](https://github.com/textclean/actions/workflows/ci.yml/badge.svg)](https://github.com/textclean/actions/workflows/ci.yml)
+![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
+![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
+
+## Contents
+
+- [The safe default](#the-safe-default)
+  - [Exit codes](#exit-codes)
+- [Transformations](#transformations)
+  - [Mixed line endings](#mixed-line-endings)
+  - [Markdown code fences](#markdown-code-fences)
+- [Choosing files](#choosing-files)
+- [`--json`](#--json)
+- [License](#license)
+
+<!-- /hero -->
+
 ## The safe default
 
 **textclean does not modify anything unless you tell it to.** Without
