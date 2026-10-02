@@ -1,0 +1,38 @@
+{
+  "name": "textclean",
+  "version": "0.1.0",
+  "description": "Text hygiene normalizer for repositories: line endings, BOM, trailing whitespace, tabs, final newline. Zero dependencies.",
+  "keywords": [
+    "text",
+    "line-endings",
+    "crlf",
+    "bom",
+    "whitespace",
+    "lint",
+    "normalizer",
+    "cli",
+    "zero-dependencies"
+  ],
+  "license": "MIT",
+  "author": "Xwalims",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "bin": {
+    "textclean": "bin/textclean.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "textclean": "node bin/textclean.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

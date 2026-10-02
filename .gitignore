@@ -1,0 +1,6 @@
+node_modules/
+npm-debug.log*
+*.tgz
+
+# textclean's own output: temp files should never survive, but just in case
+.*.textclean-*.tmp
