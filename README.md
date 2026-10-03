@@ -392,7 +392,7 @@ DEFAULTS.skipCodeFences; // null = auto (on for .md/.markdown)
 ## Development
 
 ```bash
-node --test        # 145 tests, no install needed
+node --test        # 148 tests, no install needed
 ```
 
 Tested on Node 20, 22, and 24 (`.github/workflows/ci.yml`). The suite covers
