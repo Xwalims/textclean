@@ -429,29 +429,56 @@ test('analyzeFile: a directory throws, handled by inspectFile as an error', () =
 // These tests make the docs and the parser one checked pair.
 // ---------------------------------------------------------------------------
 
-/** Flags the parser accepts, with a value where one is required. */
+/**
+ * Flags the parser accepts, with a value where one is required.
+ *
+ * The capture deliberately requires a word boundary BEFORE the `--`, so a
+ * preceding backtick or quote is not swallowed into the token. An earlier
+ * version used `.trim()` on the match instead, and `trim` strips whitespace
+ * but not a backtick: every `--flag` written in code font in the README
+ * (`` `--gitignore` ``) became the token "`--gitignore", which was then
+ * treated as a PATH. The test passed while the regression it was written for
+ * sat in the README. Verified by mutation: reinstating the bad sentence
+ * failed nothing until this was fixed.
+ */
 function acceptedFlagNames() {
   const flags = new Set();
-  for (const name of USAGE.match(/(?:^|\s)(--[a-z][a-z0-9-]*)/g) || []) {
+  for (const name of USAGE.match(/(?:^|[\s(])(--[a-z][a-z0-9-]*)/g) || []) {
     flags.add(name.trim());
   }
   return flags;
 }
 
+/** Long flags mentioned in a markdown document, code font or not. */
+function flagsIn(text) {
+  const found = new Set();
+  // (?<!-) keeps "--gitignore" from matching the tail of "----gitignore";
+  // the lookbehind is applied after the flag's own "--" is consumed.
+  for (const m of text.matchAll(/(?<!-)(--[a-z][a-z0-9-]*)/g)) {
+    found.add(m[1]);
+  }
+  return found;
+}
+
 test('every flag the README documents is a real flag', () => {
   const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
-  // Ignore the trailing "# 145 tests" line: `node --test` is the Node test
-  // runner, not a textclean flag. Every other flag in the README has to parse.
-  const documented = new Set(
-    (readme.match(/(?:^|[^-\w])(--[a-z][a-z0-9-]*)/g) || []).map((s) => s.trim()),
-  );
+  // `node --test` in the "Running tests" block is the Node test runner, not a
+  // textclean flag. Everything else the README names must actually parse.
+  const documented = flagsIn(readme);
   const accepted = acceptedFlagNames();
   for (const flag of documented) {
-    if (flag === '--test') continue; // `node --test` in the Running tests block
-    assert.ok(
-      accepted.has(flag) || parseArgs([flag]).paths !== undefined,
-      `README documents ${flag}, which the parser does not accept`,
-    );
+    if (flag === '--test') continue;
+    let ok = accepted.has(flag);
+    if (!ok) {
+      try {
+        ok = true; // the parser accepted it, so it exists
+        parseArgs([flag]);
+      } catch (err) {
+        if (err.code !== 'TEXTCLEAN_BAD_USAGE') throw err;
+        ok = false;
+      }
+    }
+    assert.ok(ok, `README documents ${flag}, which the parser does not accept`);
   }
 });
 
