@@ -38,6 +38,7 @@ OPTIONS
     --ext <a,b,c>            Only these extensions (.js,.md,...)
     --exclude <glob,...>     Skip matching paths ('*' vs '**')
     --no-gitignore           Do not honour .gitignore files
+                             (.gitignore files are honoured by default)
     --follow-symlinks        Descend through symlinks
 
   Behaviour

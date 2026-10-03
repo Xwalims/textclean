@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { parseArgs, VERSION } = require('../src/cli.js');
+const { parseArgs, VERSION, USAGE } = require('../src/cli.js');
 const { writeFileAtomic, inspectFile, analyzeFile } = require('../src/fileops.js');
 const { DEFAULTS } = require('../src/options.js');
 
@@ -417,4 +417,77 @@ test('analyzeFile: a directory throws, handled by inspectFile as an error', () =
     assert.equal(result.status, 'error');
     assert.ok(result.error);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Documentation contract.
+//
+// The README used to say "With `--gitignore` on (the default)", implying a
+// `--gitignore` flag that never existed -- the parser rejects it with
+// "unknown option", so the sentence was a broken instruction that read like
+// a real one. Nothing compared the README against the parser, so it survived.
+// These tests make the docs and the parser one checked pair.
+// ---------------------------------------------------------------------------
+
+/** Flags the parser accepts, with a value where one is required. */
+function acceptedFlagNames() {
+  const flags = new Set();
+  for (const name of USAGE.match(/(?:^|\s)(--[a-z][a-z0-9-]*)/g) || []) {
+    flags.add(name.trim());
+  }
+  return flags;
+}
+
+test('every flag the README documents is a real flag', () => {
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  // Ignore the trailing "# 145 tests" line: `node --test` is the Node test
+  // runner, not a textclean flag. Every other flag in the README has to parse.
+  const documented = new Set(
+    (readme.match(/(?:^|[^-\w])(--[a-z][a-z0-9-]*)/g) || []).map((s) => s.trim()),
+  );
+  const accepted = acceptedFlagNames();
+  for (const flag of documented) {
+    if (flag === '--test') continue; // `node --test` in the Running tests block
+    assert.ok(
+      accepted.has(flag) || parseArgs([flag]).paths !== undefined,
+      `README documents ${flag}, which the parser does not accept`,
+    );
+  }
+});
+
+test('every flag in --help is a real flag', () => {
+  for (const flag of acceptedFlagNames()) {
+    // Valued flags need a value; the usage block lists the placeholder
+    // (e.g. `--eol <lf|crlf|cr|keep>`), so try the bare flag first and, for
+    // the ones that require a value, with a plausible one.
+    const attempts = [[flag], [flag, 'lf'], [flag, '2'], [flag, 'a,b']];
+    assert.ok(
+      attempts.some((argv) => {
+        try {
+          parseArgs(argv);
+          return true;
+        } catch (err) {
+          if (err.code !== 'TEXTCLEAN_BAD_USAGE') throw err;
+          return false;
+        }
+      }),
+      `--help documents ${flag}, which the parser does not accept`,
+    );
+  }
+});
+
+test('the .gitignore prose matches the actual default', () => {
+  // DEFAULTS.gitignore is the truth; the README must not imply a flag that
+  // does not exist, and must not claim the default is off.
+  assert.equal(DEFAULTS.gitignore, true, 'gitignore handling is expected to default on');
+  assert.throws(() => parseArgs(['--gitignore']), (err) => {
+    assert.equal(err.code, 'TEXTCLEAN_BAD_USAGE');
+    assert.match(err.message, /unknown option --gitignore/);
+    return true;
+  });
+  assert.equal(parseArgs(['--no-gitignore']).options.gitignore, false);
+
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const claim = readme.match(/`--gitignore` on the?/);
+  assert.equal(claim, null, 'README still implies a --gitignore flag exists');
 });

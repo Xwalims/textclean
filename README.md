@@ -253,8 +253,10 @@ turn that off and accidentally rewrite a dependency.
 
 ### What `.gitignore` support means
 
-With `--gitignore` on (the default), textclean reads a root `.gitignore` plus
-any nested ones. Supported syntax:
+`.gitignore` handling is **on by default** and there is no flag to switch it on —
+the only one is `--no-gitignore`, which switches it off. So with no flags at
+all, textclean already reads a root `.gitignore` plus any nested ones.
+Supported syntax:
 
 - blank lines and `#` comments
 - `!` negation, last match wins
