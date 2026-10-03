@@ -38,7 +38,9 @@ Requires Node 20 or newer.
 - [Transformations](#transformations)
   - [Mixed line endings](#mixed-line-endings)
   - [Markdown code fences](#markdown-code-fences)
-- [Choosing files](#choosing-files)
+- [Selecting files](#selecting-files)
+- [Applying and reporting](#applying-and-reporting)
+- [`--diff`](#--diff)
 - [`--json`](#--json)
 - [License](#license)
 
@@ -231,17 +233,30 @@ An empty file stays empty. Adding a newline to zero bytes is noise, not hygiene.
 
 ---
 
-## Choosing files
+## Selecting files
 
 ```bash
 textclean src docs            # only these paths
 textclean . --ext .js,.md     # only these extensions
 textclean . --exclude dist    # skip matching paths
 textclean . --no-gitignore    # ignore .gitignore files
+textclean . --follow-symlinks # descend through symlinked directories
 ```
 
 `.git` and `node_modules` are **always** skipped, unconditionally — you cannot
 turn that off and accidentally rewrite a dependency.
+
+| Flag | Effect |
+| ---- | ------ |
+| `--ext <a,b,c>` | Only these extensions, e.g. `.js,.md` |
+| `--exclude <glob,...>` | Skip matching paths |
+| `--no-gitignore` | Do not honour `.gitignore` files (honoured by default) |
+| `--follow-symlinks` | Descend through symlinked directories |
+
+Symlinks are **not** followed by default, so a symlink pointing outside the
+project cannot pull foreign files into the report. With `--follow-symlinks`
+textclean descends into them; a symlinked **file** is then read and can be
+cleaned like any other, so point it only where you mean it.
 
 `--exclude` takes globs:
 
@@ -269,6 +284,22 @@ Supported syntax:
 Not supported, and not claimed anywhere: backslash line continuations, regex
 class edge cases beyond a plain class, and git's per-file precedence rules for
 nested ignore files beyond plain last-match-wins within one file.
+
+---
+
+## Applying and reporting
+
+With no `--write` nothing is modified. These three control what happens instead:
+
+| Flag | Effect |
+| ---- | ------ |
+| `--write`, `--in-place` | Apply changes to disk (atomic, mode preserved) |
+| `--check` | Change nothing; exit **1** if any file would change |
+| `--diff` | Print a unified diff of what would change |
+
+`--quiet` narrows any of them: only problems are printed, so a clean run is
+silent. `--version` prints the version. Both work in every mode and never touch
+the filesystem.
 
 ---
 

@@ -40,6 +40,11 @@ function runBin(args, cwd) {
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
+/** The help text as a user actually receives it: from the real binary. */
+function runHelp() {
+  return runBin(['--help']).stdout;
+}
+
 // ---------------------------------------------------------------------------
 // Argument parsing.
 // ---------------------------------------------------------------------------
@@ -517,4 +522,79 @@ test('the .gitignore prose matches the actual default', () => {
   const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
   const claim = readme.match(/`--gitignore` on the?/);
   assert.equal(claim, null, 'README still implies a --gitignore flag exists');
+});
+
+// Direction 4 of the flag contract, and the one the two tests above cannot see:
+// help -> README. Those start from the README (is a documented flag real?) or
+// from help (is a help flag real?). Neither can notice a working flag that the
+// README simply never mentions -- `--follow-symlinks`, `--in-place`, `--quiet`
+// and `--version` all shipped in --help and in the parser while appearing in
+// zero README lines, so the only way to discover them was to run --help.
+//
+// The guard is deliberately checked against the REAL help output rather than the
+// USAGE constant, because USAGE is the string the README is supposed to cover:
+// deriving both sides from it would make the test unable to fail.
+
+test('every flag in --help is documented in the README', () => {
+  const help = runHelp();
+  assert.ok(help.includes('--eol'), 'sanity: --help must have produced real output');
+
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const documented = flagsIn(readme);
+  const inHelp = flagsIn(help);
+
+  // `npm test` is the package script, not a CLI flag.
+  for (const flag of inHelp) {
+    if (flag === '--test') continue;
+    assert.ok(
+      documented.has(flag),
+      `--help offers ${flag}, which the README never mentions; a flag nobody can ` +
+      'find in the docs is a shipped feature with no documentation'
+    );
+  }
+});
+
+test('the direction-4 check would catch an undocumented flag', () => {
+  // The check above has never failed, which is not yet evidence. Reinstate one
+  // of the four gaps in a copy of the README and require the test logic to
+  // reject it -- otherwise this is decoration.
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const stripped = readme
+    .replace(/`--follow-symlinks`/g, 'the symlink option')
+    .replace(/--follow-symlinks/g, '');
+  assert.notEqual(stripped, readme, 'sanity: the stripping must actually change the README');
+
+  const help = runHelp();
+  const missing = [...flagsIn(help)].filter(
+    (f) => f !== '--test' && !flagsIn(stripped).has(f),
+  );
+  assert.ok(
+    missing.includes('--follow-symlinks'),
+    `expected the stripped README to lose --follow-symlinks, lost: ${JSON.stringify(missing)}`,
+  );
+});
+
+test('each newly documented flag is real and does what the README says', () => {
+  // Direction 4 only pins that a flag is *mentioned*. This pins that the
+  // mention is not a phantom: each of the four was invisible in the docs, so
+  // nothing had ever asserted it parses.
+  for (const flag of ['--in-place', '--follow-symlinks', '--quiet', '--version']) {
+    const attempts = [[flag], [flag, 'src']];
+    const accepted = attempts.some((argv) => {
+      try {
+        parseArgs(argv);
+        return true;
+      } catch (err) {
+        if (err.code !== 'TEXTCLEAN_BAD_USAGE') throw err;
+        return false;
+      }
+    });
+    assert.ok(accepted, `README documents ${flag}, which the parser rejects`);
+  }
+
+  // And the pair that matters most: --in-place must be the same switch as
+  // --write, not a second flag that quietly does nothing.
+  assert.equal(parseArgs(['--in-place']).options.write, parseArgs(['--write']).options.write);
+  assert.equal(parseArgs(['--follow-symlinks']).options.followSymlinks, true);
+  assert.equal(parseArgs([]).options.followSymlinks, false, 'symlinks stay off by default');
 });
