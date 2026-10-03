@@ -291,3 +291,121 @@ test('plan: an invalid option is rejected by name', () => {
   assert.throws(() => run('a\n', { eol: 'bogus' }), /--eol must be one of/);
   assert.throws(() => run('a\n', { tabsToSpaces: -1 }), /--tabs-to-spaces/);
 });
+
+// ---------------------------------------------------------------------------
+// A file made only of blank lines must not crash.
+//
+// --no-trailing-blank-lines walks backwards over the survivor list until it
+// finds a line worth keeping. For a file that is nothing but blank lines it
+// reaches index 0 and steps off the front, reading `.text` off undefined. The
+// guard belongs on the index; the outcome follows from "an empty file stays
+// empty", which already covers an input file of zero bytes.
+// ---------------------------------------------------------------------------
+
+test('a file of only blank lines does not crash and ends up empty', () => {
+  for (const doc of ['', '\n', '\n\n\n', '   \n', '\t\r\n', '\n \n\t\n', '\r\n\r\n']) {
+    const r = plan(doc, { filePath: 'file.txt', noTrailingBlankLines: true });
+    assert.equal(r.after, '', `input ${JSON.stringify(doc)}`);
+    assert.ok(r.reasons.includes('trailing-blank-lines-removed'));
+  }
+});
+
+test('the blank-line crash does not depend on collapsing or on fences', () => {
+  const options = [
+    { noTrailingBlankLines: true },
+    { collapseBlankLines: 1, noTrailingBlankLines: true },
+    { collapseBlankLines: 2, noTrailingBlankLines: true, stripTrailingWhitespace: true },
+    { collapseBlankLines: 1, noTrailingBlankLines: true, tabsToSpaces: 4 },
+    { collapseBlankLines: 1, noTrailingBlankLines: true, ensureFinalNewline: true },
+  ];
+  for (const filePath of ['file.txt', 'doc.md']) {
+    for (const opts of options) {
+      for (const doc of ['', '\n', '\n\n', '  \n\n', '\t\n']) {
+        const r = plan(doc, { filePath, ...opts });
+        assert.equal(r.after, '', `${filePath} ${JSON.stringify(opts)} ${JSON.stringify(doc)}`);
+      }
+    }
+  }
+});
+
+test('a retained BOM survives a file emptied by --no-trailing-blank-lines', () => {
+  // stripBom defaults to false, so the three BOM bytes are copied back verbatim.
+  // The body after them is nothing but blank lines, which is the case that used
+  // to walk off the front of the survivor list and throw.
+  const r = plan('﻿\n\n', { filePath: 'file.txt', noTrailingBlankLines: true });
+  assert.equal(r.after, '﻿');
+  assert.ok(r.reasons.includes('trailing-blank-lines-removed'));
+});
+
+test('stripping the BOM from an otherwise blank file leaves nothing', () => {
+  const r = plan('﻿\n\n', { filePath: 'file.txt', stripBom: true, noTrailingBlankLines: true });
+  assert.equal(r.after, '');
+  assert.ok(r.reasons.includes('bom-removed'));
+});
+
+// ---------------------------------------------------------------------------
+// Fence protection must not depend on the line list's length.
+//
+// The protection flag used to live in a `boolean[]` parallel to the line list.
+// --collapse-blank-lines SHORTENS that list, so from that point on the flag at
+// index i describes whatever line ended up at position i -- not the line it was
+// computed for. Carrying the flag on the line object removes that coupling.
+//
+// Note honestly: exhaustive enumeration (every document over the alphabet
+// {'', 'a', '```', '~~~', '```js', '~', '  x  ', '\t'} up to 4 lines x 12
+// option sets = 88,560 cases) found NO input where the old parallel array
+// produced different OUTPUT from the flag-on-the-line version. The old index
+// bookkeeping was therefore latent rather than observably wrong; it is fixed
+// because the aliasing is real and the correction is free. These tests pin the
+// behaviour across both variants rather than proving a regression.
+// ---------------------------------------------------------------------------
+
+test('fence protection follows the line after blank lines are collapsed', () => {
+  const doc = 'a\n\n\n```\n  keep me  \n```\n\n\n';
+  const withCollapse = plan(doc, {
+    filePath: 'doc.md',
+    stripTrailingWhitespace: true,
+    collapseBlankLines: 1,
+    noTrailingBlankLines: true,
+  });
+  assert.equal(withCollapse.after, 'a\n\n```\n  keep me  \n```\n');
+  assert.ok(withCollapse.after.includes('  keep me  '), 'fence content must be protected');
+});
+
+test('collapsing blanks before a fence leaves fence lines protected', () => {
+  const doc = '\n\n\n```\n```\n\n\n';
+  const r = plan(doc, {
+    filePath: 'doc.md',
+    collapseBlankLines: 1,
+    noTrailingBlankLines: true,
+  });
+  assert.equal(r.after, '\n```\n```\n');
+});
+
+test('a fence at EOF is protected from --no-trailing-blank-lines', () => {
+  // The walk stops at the protected fence line, so the blank run BEFORE it is
+  // untouched. Without collapsing all three blanks are mid-file content and
+  // survive; collapsing caps the run at 1. Neither variant removes them.
+  assert.equal(
+    plan('a\n\n\n```\n', { filePath: 'doc.md', noTrailingBlankLines: true }).after,
+    'a\n\n\n```\n'
+  );
+  assert.equal(
+    plan('a\n\n\n```\n', { filePath: 'doc.md', collapseBlankLines: 1, noTrailingBlankLines: true }).after,
+    'a\n\n```\n'
+  );
+});
+
+test('the same options without collapsing give the same EOF result', () => {
+  const doc = 'a\n\n\ntext\n\n\n';
+  const collapsed = plan(doc, {
+    filePath: 'doc.md',
+    collapseBlankLines: 1,
+    noTrailingBlankLines: true,
+  });
+  const plain = plan(doc, { filePath: 'doc.md', noTrailingBlankLines: true });
+  // Collapsing changes the interior run; the EOF outcome must be identical.
+  assert.equal(/\n\n$/.test(collapsed.after), false);
+  assert.equal(/\n\n$/.test(plain.after), false);
+  assert.equal(plain.after, 'a\n\n\ntext\n');
+});

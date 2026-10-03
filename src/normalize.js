@@ -213,8 +213,19 @@ function plan(content, rawOptions = {}) {
   const { lines: rawLines, terms } = splitLines(body);
   // Each line keeps the terminator that FOLLOWED it, so a removed line takes
   // its own terminator with it and the survivors stay correctly separated.
-  const lines = rawLines.map((text, i) => ({ text, term: terms[i] }));
-  const mask = skipFences ? fenceMask(lines.map((l) => l.text)) : new Array(lines.length).fill(false);
+  //
+  // The fence-protection flag rides ON THE LINE rather than in a parallel
+  // `boolean[]`. That matters because --collapse-blank-lines SHORTENS the line
+  // list: a parallel array would still be indexed by the original line numbers,
+  // so after the list is filtered the flag at any given index would describe a
+  // different line. Carrying it with the line makes the later passes immune to
+  // the shift by construction.
+  const rawMask = skipFences ? fenceMask(rawLines) : new Array(rawLines.length).fill(false);
+  const lines = rawLines.map((text, i) => ({
+    text,
+    term: terms[i],
+    protected: rawMask[i],
+  }));
 
   // splitLines yields a final EMPTY line exactly when the text ended with a
   // newline ('a\nb\n' -> ['a','b',''], but 'a\nb' -> ['a','b']). That empty
@@ -225,7 +236,7 @@ function plan(content, rawOptions = {}) {
   const originalFinalTerm = hadFinalNewline ? terms[terms.length - 2] : '';
 
   for (let i = 0; i < lines.length; i += 1) {
-    if (mask[i]) continue;
+    if (lines[i].protected) continue;
     let line = lines[i].text;
 
     if (options.tabsToSpaces > 0 && line.includes('\t')) {
@@ -252,7 +263,7 @@ function plan(content, rawOptions = {}) {
     const kept = [];
     let run = 0;
     for (let i = 0; i < working.length; i += 1) {
-      const blank = !mask[i] && BLANK_RE.test(working[i].text);
+      const blank = !working[i].protected && BLANK_RE.test(working[i].text);
       if (!blank) {
         run = 0;
         kept.push(working[i]);
@@ -287,13 +298,30 @@ function plan(content, rawOptions = {}) {
   let surviving = working;
   if (options.noTrailingBlankLines) {
     let end = surviving.length;
-    while (end > 0 && !mask[end - 1] && BLANK_RE.test(surviving[end - 1].text)) {
+    // `end` walks BACKWARDS, so `surviving[end - 1]` is undefined as soon as
+    // `end` reaches 0. That happens for a file that is nothing but blank lines,
+    // which every pass above can legitimately reduce to an empty list; the
+    // guard stops the walk reading `.text` off undefined.
+    while (end > 0 && !surviving[end - 1].protected && BLANK_RE.test(surviving[end - 1].text)) {
       end -= 1;
     }
     if (end < surviving.length) {
       reasons.add('trailing-blank-lines-removed');
       surviving = surviving.slice(0, end);
     }
+  }
+
+  // Every line was blank and every one was dropped. There is nothing left to
+  // terminate, so the result is the empty string rather than a lone newline:
+  // "an empty file stays empty" applies to a file emptied by this pass too.
+  if (surviving.length === 0) {
+    reasons.add('trailing-blank-lines-removed');
+    return {
+      ...base,
+      after: buffer.subarray(0, keepBytes).toString('utf8'),
+      changed: keepBytes !== buffer.length,
+      reasons: Array.from(reasons),
+    };
   }
 
   // Join every line with its own terminator. This already reproduces the whole
