@@ -5,8 +5,19 @@ final newlines — found, reported, and fixed with one command.
 
 **Zero dependencies.** Node's standard library only. Nothing to install, ever.
 
-```bash
-npm install -g textclean     # or: npx textclean
+This package is **not published to npm** — that name belongs to an unrelated
+text-cleaning library. Run it from a checkout:
+
+```console
+$ git clone https://github.com/Xwalims/textclean.git
+$ cd textclean
+$ node bin/textclean.js --help
+```
+
+Or link it onto your `PATH`:
+
+```console
+$ npm link          # provides the `textclean` command
 ```
 
 Requires Node 20 or newer.
@@ -15,7 +26,7 @@ Requires Node 20 or newer.
 
 <!-- hero -->
 
-[![CI](https://github.com/textclean/actions/workflows/ci.yml/badge.svg)](https://github.com/textclean/actions/workflows/ci.yml)
+[![CI](https://github.com/Xwalims/textclean/actions/workflows/ci.yml/badge.svg)](https://github.com/Xwalims/textclean/actions/workflows/ci.yml)
 ![node 20+](https://img.shields.io/badge/node-20+-brightgreen)
 ![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![dependencies](https://img.shields.io/badge/dependencies-none-2f6f4f)
@@ -91,8 +102,11 @@ $ echo $?
 ```yaml
 # .github/workflows/ci.yml
 - name: Check text hygiene
-  run: npx textclean . --check --eol lf --strip-bom --strip-trailing-whitespace
+  run: node textclean/bin/textclean.js . --check --eol lf --strip-bom --strip-trailing-whitespace
 ```
+
+The command is `textclean`, so if you have linked this package (`npm link`) or
+installed it as a dev dependency, `npx textclean ...` works equally well.
 
 ### Exit codes
 
