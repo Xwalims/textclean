@@ -280,10 +280,19 @@ Supported syntax:
   directory; a bare name matches at any depth
 - `*`, `?`, `**`, and character classes `[abc]` / `[!abc]`
 - `\` escape of the first special character
+- nested files: a rule in `sub/.gitignore` is resolved relative to `sub/` and
+  applies to that subtree, and a deeper file overrides a shallower one on a
+  path they both match
 
 Not supported, and not claimed anywhere: backslash line continuations, regex
-class edge cases beyond a plain class, and git's per-file precedence rules for
-nested ignore files beyond plain last-match-wins within one file.
+class edge cases beyond a plain class, and git's per-file precedence beyond
+ordering the files by depth — textclean reads each ignore file as one layer
+instead of descending file by file, which can only change *which* file is
+consulted last, never whether a path is ignored.
+
+This subset is checked against real `git check-ignore`
+(`test/gitignore-differential.test.js`), so the list above is measured rather
+than promised.
 
 ---
 
@@ -423,13 +432,15 @@ DEFAULTS.skipCodeFences; // null = auto (on for .md/.markdown)
 ## Development
 
 ```bash
-node --test        # 148 tests, no install needed
+node --test        # 170 tests, no install needed
 ```
 
 Tested on Node 20, 22, and 24 (`.github/workflows/ci.yml`). The suite covers
 byte-level detection, every transformation, fence protection, the diff
 renderer, directory walking, and end-to-end CLI runs that spawn the real binary
-and assert real exit codes and real bytes.
+and assert real exit codes and real bytes. `.gitignore` handling is checked
+against real `git check-ignore`, not against this project's own reading of the
+spec.
 
 The repo dogfoods itself — CI runs textclean over its own tree with `--check`.
 

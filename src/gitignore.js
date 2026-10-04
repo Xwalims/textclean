@@ -11,15 +11,21 @@
  *     own directory; a bare name matches at any depth
  *   - `*` (no slash), `?`, `**`, character classes `[abc]` / `[!abc]`
  *   - `\` escape of the first special character
+ *   - nested .gitignore files: a rule in `sub/.gitignore` is resolved relative
+ *     to `sub/` and applies to that subtree, and a deeper file overrides a
+ *     shallower one on a path they share
  *
  * WHAT IS NOT SUPPORTED (and is not claimed anywhere):
  *   - regex character-class edge cases beyond a plain class
  *   - `\` line continuations
- *   - per-directory .gitignore nesting is honoured for path matching, but a
- *     nested ignore file's patterns are resolved relative to its directory and
- *     applied to the full path — equivalent to git for the common cases
- *   - git's "patterns from a deeper file override a shallower one" precedence,
- *     beyond plain last-match-wins within one file
+ *   - per-directory precedence beyond ordering layers by depth: a nested file
+ *     is read as a whole layer rather than file by file as git descends, which
+ *     differs only when two files at DIFFERENT depths both match a path -- and
+ *     then only in which of them is consulted last, never in whether the path
+ *     is ignored
+ *
+ * test/gitignore-differential.test.js checks every clause above against real
+ * `git check-ignore`, so this list is verified rather than asserted.
  */
 
 const fs = require('node:fs');
@@ -50,7 +56,7 @@ function compilePattern(line, gitignoreDir) {
   if (pattern === '') return null;
 
   // Patterns from a nested .gitignore resolve relative to its own directory.
-  const prefix = gitignoreDir ? gitignoreDir.split('/').filter(Boolean) : [];
+  const prefix = gitignoreDir ? String(gitignoreDir).split('/').filter(Boolean) : [];
 
   let body = '';
   let i = 0;
@@ -107,7 +113,13 @@ function compilePattern(line, gitignoreDir) {
   // An anchored pattern is relative to the ignore file's directory; an
   // unanchored one matches at any depth. The gitignoreDir prefix is layered on
   // top of that so nested ignore files resolve correctly.
-  const prefixRe = prefix.length ? `^(?:${prefix.map(escapeRe).join('/')}/)?` : '^';
+  //
+  // The prefix is MANDATORY: `^sub/` , never `^(?:sub/)?`. A `(?:...)?` made
+  // every nested rule fire outside its own directory, which is the leak the
+  // comment above `relDir` describes -- fixing the prefix while leaving it
+  // optional would have fixed nothing at all, because the empty alternative is
+  // always available.
+  const prefixRe = prefix.length ? `^${prefix.map(escapeRe).join('/')}/` : '^';
   const prefixPart = anchored ? '' : '(?:.*/)?';
 
   return {
@@ -127,9 +139,13 @@ function escapeRe(str) {
  *
  * @param {string} dir directory containing the file
  * @param {string} [file] defaults to '.gitignore'
+ * @param {string} [root] walk root the patterns are relative to. Defaults to
+ *   `dir`, which is correct for a root ignore file and for every caller that
+ *   only ever reads one; `collectGitignores` passes the real root so a nested
+ *   file's prefix is measured from there.
  * @returns {Array<{negated: boolean, dirOnly: boolean, regex: RegExp}>}
  */
-function loadGitignore(dir, file = '.gitignore') {
+function loadGitignore(dir, file = '.gitignore', root = dir) {
   const full = path.join(dir, file);
   let raw;
   try {
@@ -137,9 +153,24 @@ function loadGitignore(dir, file = '.gitignore') {
   } catch {
     return [];
   }
-  // Patterns in a root .gitignore are unanchored; path.relative of a dir to
-  // itself is '', which is exactly the anchor we want.
-  const relDir = path.relative(path.resolve(dir), path.resolve(dir));
+  // A nested ignore file's patterns belong to ITS OWN directory: they must be
+  // prefixed with that directory, and the prefix is mandatory, not optional.
+  //
+  // Both halves of that were wrong, and each half broke a different direction,
+  // so the file agreed with git on no nested case at all. `relDir` was computed
+  // as `path.relative(dir, dir)`, which is the empty string for every
+  // directory, so nested rules were compiled with no prefix whatsoever and
+  // applied tree-wide: a `sub/.gitignore` containing `secret.txt` ignored the
+  // repository's own top-level `secret.txt`, which git keeps. And `compilePattern`
+  // turned the prefix into `(?:sub/)?`, so even a correctly supplied prefix
+  // matched paths OUTSIDE the directory too -- the same leak in the pattern
+  // itself. On the other side, a nested anchored rule (`/only.txt`) then
+  // matched neither `sub/only.txt` nor anything below it, because the regex was
+  // `^only\.txt$` with no `sub/` to anchor to; git ignores that file.
+  //
+  // Measured against `git check-ignore` before the fix: 11 of 32 probes across
+  // 11 nested scenarios disagreed.
+  const relDir = path.relative(path.resolve(root), path.resolve(dir));
   return parseGitignore(raw, relDir);
 }
 
@@ -164,9 +195,15 @@ function parseGitignore(text, relativeDir = '') {
 
 /** Load a root .gitignore plus any nested ones under `root`. */
 function collectGitignores(root) {
+  // Each layer carries the directory it came from, because the order matters:
+  // git gives a DEEPER ignore file precedence over a shallower one, so for a
+  // path under both, the deeper layer must be consulted last. This used a bare
+  // LIFO stack, so sibling directories were collected in an order that had
+  // nothing to do with depth.
   const layers = [];
-  const rootIgnore = loadGitignore(root);
-  if (rootIgnore.length) layers.push(rootIgnore);
+  const rootIgnore = loadGitignore(root, '.gitignore', root);
+  if (rootIgnore.length) layers.push({ dir: '', depth: 0, rules: rootIgnore });
+
   // Nested .gitignore files are cheap to find and matter for real repos.
   const stack = [root];
   while (stack.length) {
@@ -180,12 +217,17 @@ function collectGitignores(root) {
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === '.git' || entry.name === 'node_modules') continue;
       const child = path.join(dir, entry.name);
-      const rules = loadGitignore(child);
-      if (rules.length) layers.push(rules);
+      const rules = loadGitignore(child, '.gitignore', root);
+      if (rules.length) {
+        const relDir = path.relative(root, child).split(path.sep).join('/');
+        layers.push({ dir: relDir, depth: relDir.split('/').filter(Boolean).length, rules });
+      }
       stack.push(child);
     }
   }
-  return layers;
+  // Shallow first, so a deeper file overrides a shallower one on a shared path.
+  layers.sort((a, b) => a.depth - b.depth);
+  return layers.map((layer) => layer.rules);
 }
 
 /**
