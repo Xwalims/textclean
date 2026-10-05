@@ -16,7 +16,6 @@
  *     shallower one on a path they share
  *
  * WHAT IS NOT SUPPORTED (and is not claimed anywhere):
- *   - regex character-class edge cases beyond a plain class
  *   - `\` line continuations
  *   - per-directory precedence beyond ordering layers by depth: a nested file
  *     is read as a whole layer rather than file by file as git descends, which
@@ -63,24 +62,42 @@ function compilePattern(line, gitignoreDir) {
   while (i < pattern.length) {
     const ch = pattern[i];
     if (ch === '*') {
-      if (pattern[i + 1] === '*') {
-        // `**/` -> any number of directories; trailing `/**` -> everything below.
-        if (pattern[i + 2] === '/') {
-          body += '(?:.*/)?';
-          i += 3;
-          continue;
-        }
-        if (i + 2 === pattern.length) {
-          body += '.*';
-          i += 2;
-          continue;
-        }
-        body += '.*';
-        i += 2;
+      // A run of 2 or more asterisks is a globstar, however long it is: git
+      // treats `***` exactly as `**`. Counting only the first two made the rest
+      // of the run fall through to the single-star branch, so `***/**` compiled
+      // to `.*[^/]*\/.*` — which then demanded a slash and ignored nothing at
+      // the top level, where git ignores everything.
+      let run = 1;
+      while (pattern[i + run] === '*') run++;
+
+      // A globstar counts only when the run is bounded on BOTH sides by a slash
+      // or by a string end; git collapses anything else to a single `*`. The
+      // trailing side used to be checked and the leading side ignored, so
+      // `[a-]**/**` compiled to `^(?:.*/)?[a\-](?:.*/)?.*$` and swallowed every
+      // top-level name starting with `a`, where git keeps them all — the
+      // degraded run cannot cross the slash, and the pattern then needs one.
+      //
+      // Both sides measured: `x**/a` and `**x/a` match nothing at all in git,
+      // while `**/a`, `x/**/a` and `x/**` behave as globstars.
+      const before = i === 0 ? null : pattern[i - 1];
+      const after = i + run < pattern.length ? pattern[i + run] : null;
+      const bounded =
+        run >= 2 &&
+        (before === '/' || before === null) &&
+        (after === '/' || after === null);
+
+      if (!bounded) {
+        body += '[^/]*';
+        i += run;
         continue;
       }
-      body += '[^/]*';
-      i += 1;
+      if (after === '/') {
+        body += '(?:.*/)?';
+        i += run + 1;
+        continue;
+      }
+      body += '.*';
+      i += run;
       continue;
     }
     if (ch === '?') {
@@ -89,11 +106,9 @@ function compilePattern(line, gitignoreDir) {
       continue;
     }
     if (ch === '[') {
-      const close = pattern.indexOf(']', i + 1);
+      const close = findClassEnd(pattern, i);
       if (close !== -1) {
-        let cls = pattern.slice(i + 1, close);
-        if (cls.startsWith('!')) cls = `^${cls.slice(1)}`;
-        body += `[${cls}]`;
+        body += compileClass(pattern.slice(i + 1, close));
         i = close + 1;
         continue;
       }
@@ -132,6 +147,186 @@ function compilePattern(line, gitignoreDir) {
 
 function escapeRe(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** The slash itself. */
+const SLASH_CODE = '/'.charCodeAt(0);
+
+/**
+ * Find the index of the `]` closing a class opened at `start`.
+ * Returns -1 when the class is unterminated, which makes the caller emit a
+ * literal `[` — git does the same, and such a pattern simply matches nothing.
+ *
+ * The interior is scanned escape-aware, because the two obvious readings both
+ * disagree with git:
+ *
+ *   - `indexOf(']')` stops at an ESCAPED `]`. So `[a\]` looked terminated and
+ *     compiled to the RegExp fragment `[a\]`, whose `\]` closes the class and
+ *     leaves the `]` literal — and then the fragment is never closed at all, so
+ *     `new RegExp` throws. Any `.gitignore` containing `[a\]` crashed the CLI.
+ *   - a plain `indexOf` also treats a LEADING `]` as the terminator, so `[]a]`
+ *     compiled to the empty class `[]`, which can never match. git reads the
+ *     leading `]` as a literal member and ignores `a` and `]` alike.
+ *
+ * Both shapes were measured against `git check-ignore`, not read off a spec.
+ *
+ * @param {string} s
+ * @param {number} start index of the opening `[`
+ * @returns {number} index of the closing `]`, or -1
+ */
+function findClassEnd(s, start) {
+  let i = start + 1;
+  if (s[i] === '!' || s[i] === '^') i++;
+  if (s[i] === ']') i++; // a leading `]` is a literal member, not the end
+  while (i < s.length) {
+    if (s[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (s[i] === ']') return i;
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Remove the slash from a set of ranges, splitting any range that spans it.
+ *
+ * A class is the one token in the language that used to match the path
+ * separator: `*` compiles to `[^/]*`, `?` to `[^/]`, and a literal slash is
+ * escaped, so all three refuse it — while a class containing `/` was pasted
+ * straight into the RegExp and so matched it, inverting the rule every other
+ * token obeys.
+ *
+ * Splitting rather than dropping is measured, because the two obvious fixes
+ * each lose something real:
+ *
+ *     [+-0]  (0x2B..0x30) -> keeps + , - . 0, never /   -> two ranges
+ *     [--/]  (0x2D..0x2F) -> keeps - and ., never /     -> one range
+ *     [/0]   (0x2F..0x30) -> keeps 0, never /           -> one range
+ *
+ * Dropping the range would lose `0` in `[+-0]`; keeping it whole is the bug.
+ *
+ * The negated form needs no adjustment here, because "every class is barred
+ * from the slash" and "a negated class excludes the slash" are one statement.
+ *
+ * @param {Array<[string, string]>} ranges
+ * @returns {Array<[string, string]>}
+ */
+function excludeSlash(ranges) {
+  const before = String.fromCharCode(SLASH_CODE - 1);
+  const after = String.fromCharCode(SLASH_CODE + 1);
+  const out = [];
+  for (const [lo, hi] of ranges) {
+    const loCode = lo.charCodeAt(0);
+    const hiCode = hi.charCodeAt(0);
+    if (hiCode < SLASH_CODE) {
+      out.push([lo, hi]);
+    } else if (loCode > SLASH_CODE) {
+      out.push([lo, hi]);
+    } else if (loCode === hiCode) {
+      // The range is the slash alone: it has no members left, so drop it.
+    } else {
+      if (loCode < SLASH_CODE) out.push([lo, before]);
+      if (hiCode > SLASH_CODE) out.push([after, hi]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse the interior of a class into `[lo, hi]` ranges, honouring escapes and
+ * git's "a `-` at either end is a literal" rule.
+ *
+ * Measured against git for every shape below:
+ *
+ *     [a-]   -> a and -        (trailing - is a literal)
+ *     [-a]   -> a and -        (leading - is a literal)
+ *     [a\-c] -> a, c and -     (escaped - is a literal)
+ *     [b-a]  -> b only         (reversed range: the high endpoint is dropped)
+ *     [\]    -> ] (escaped); `[\` alone stays unterminated
+ *     [a\b]  -> a and b        (an escape inside the class escapes the next char)
+ *
+ * A reversed range is the one genuinely surprising result: git does not reject
+ * it and does not treat it as a literal `b`, `-`, `a` run — it matches `b`
+ * alone, i.e. the low endpoint with the span discarded.
+ *
+ * @param {string} body interior of the class, without the brackets
+ * @returns {{negated: boolean, ranges: Array<[string, string]>}}
+ */
+function parseClassBody(body) {
+  let negated = false;
+  let k = 0;
+  if (body[0] === '!' || body[0] === '^') {
+    negated = true;
+    k = 1;
+  }
+
+  const ranges = [];
+  const at = (i) => (body[i] === '\\' && i + 1 < body.length ? [body[i + 1], 2] : [body[i], 1]);
+
+  while (k < body.length) {
+    const [lo, loStep] = at(k);
+    k += loStep;
+
+    // A range needs `lo`, a literal `-`, and a higher endpoint. A `-` in final
+    // position has no endpoint after it, so it stands for itself.
+    if (body[k] === '-' && k + 1 < body.length) {
+      const [hi, hiStep] = at(k + 1);
+      k += 1 + hiStep;
+      const loCode = lo.charCodeAt(0);
+      const hiCode = hi.charCodeAt(0);
+      if (hiCode >= loCode) {
+        ranges.push([lo, hi]);
+        continue;
+      }
+      // Reversed: git keeps the low endpoint only. Pushing it as a single-char
+      // range is exactly that, and keeps `b` matching in `[b-a]`.
+      ranges.push([lo, lo]);
+      continue;
+    }
+    ranges.push([lo, lo]);
+  }
+
+  return { negated, ranges: excludeSlash(ranges) };
+}
+
+/**
+ * Compile a class interior into a RegExp fragment.
+ *
+ * Every member is escaped individually rather than pasted as a slice, so no
+ * input can produce a syntactically invalid RegExp: an escaped `]` becomes
+ * `\x5d`, a `-` in literal position becomes `\-`, and a member that happens to
+ * be `\` becomes `\\`. The old code pasted the raw interior between brackets,
+ * which is where the crash above came from.
+ */
+function compileClass(body) {
+  const { negated, ranges } = parseClassBody(body);
+  const member = (ch) => (ch === '/' ? '\\/' : escapeRe(ch));
+
+  if (negated) {
+    // Enumerate the excluded set so the fragment can start from a guaranteed
+    // non-empty base; a class whose only members were the slash is left with
+    // none, and `[^]` is not valid RegExp syntax.
+    const excluded = [];
+    for (const [lo, hi] of ranges) {
+      for (let c = lo.codePointAt(0); c <= hi.codePointAt(0); c++) {
+        excluded.push(String.fromCodePoint(c));
+      }
+    }
+    return `[^/${excluded.map(member).join('') || '\\x00'}]`;
+  }
+
+  const alts = ranges.map(([lo, hi]) => {
+    // A literal `-` must not open a span: in RegExp `[-c]` is the range `-`..`c`,
+    // not the two characters. It can only arrive here via an escape such as
+    // `[\--c]`, which is exactly the case that would otherwise be misread.
+    const a = lo === '-' ? '\\-' : member(lo);
+    return lo === hi ? a : `${a}-${member(hi)}`;
+  });
+  // An empty class matches nothing; `\x00` is a fragment that is syntactically
+  // valid and matches no name a path can have.
+  return `[${alts.join('') || '\\x00'}]`;
 }
 
 /**

@@ -284,15 +284,29 @@ Supported syntax:
   applies to that subtree, and a deeper file overrides a shallower one on a
   path they both match
 
-Not supported, and not claimed anywhere: backslash line continuations, regex
-class edge cases beyond a plain class, and git's per-file precedence beyond
-ordering the files by depth — textclean reads each ignore file as one layer
-instead of descending file by file, which can only change *which* file is
-consulted last, never whether a path is ignored.
+Not supported, and not claimed anywhere: backslash line continuations, and git's
+per-file precedence beyond ordering the files by depth — textclean reads each
+ignore file as one layer instead of descending file by file, which can only
+change *which* file is consulted last, never whether a path is ignored.
+
+A few class and globstar rules were wrong enough to be worth writing down,
+because each was measured rather than assumed:
+
+- a character class **never** matches a slash, even when it contains one, and a
+  range that spans the slash is **split** so its other members survive (`[+-0]`
+  keeps `+ , - . 0`, `[--/]` keeps `-` and `.`)
+- a leading `]` is a literal member, so `[]a]` matches `]` and `a`
+- a `-` at either end of a class is a literal (`[a-]`, `[-a]`, `[a\-c]`)
+- a reversed range keeps its **low** endpoint alone: `[b-a]` matches `b`
+- an unterminated `[` is literal text, matching nothing
+- a globstar is **any run of two or more asterisks** — `***` is `**`, not a
+  globstar followed by a stray star
 
 This subset is checked against real `git check-ignore`
 (`test/gitignore-differential.test.js`), so the list above is measured rather
-than promised.
+than promised. The character-class and globstar cases there were found by
+fuzzing patterns against git, after the class compiler proved to be the one
+token in the language that matched the path separator when nothing else did.
 
 ---
 
@@ -432,7 +446,7 @@ DEFAULTS.skipCodeFences; // null = auto (on for .md/.markdown)
 ## Development
 
 ```bash
-node --test        # 170 tests, no install needed
+node --test        # 174 tests, no install needed
 ```
 
 Tested on Node 20, 22, and 24 (`.github/workflows/ci.yml`). The suite covers
