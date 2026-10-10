@@ -296,9 +296,16 @@ because each was measured rather than assumed:
   range that spans the slash is **split** so its other members survive (`[+-0]`
   keeps `+ , - . 0`, `[--/]` keeps `-` and `.`)
 - a leading `]` is a literal member, so `[]a]` matches `]` and `a`
-- a `-` at either end of a class is a literal (`[a-]`, `[-a]`, `[a\-c]`)
+- a `-` at either end of a class is a literal (`[a-]`, `[-a]`, `[a\-c]`), and a
+  dash inside a **negated** class is a literal too — `[!-z]` matches everything
+  except `-` and `z`, not a range from `/` to `z`
 - a reversed range keeps its **low** endpoint alone: `[b-a]` matches `b`
-- an unterminated `[` is literal text, matching nothing
+- an unterminated `[` makes the **whole rule** inert, so `x[abc` ignores
+  nothing — not even the `x`
+- an escaped trailing space belongs to the name: `foo\ ` matches `foo ` and not
+  `foo`, while an unescaped `foo   ` matches `foo`
+- a trailing run of an **odd** number of backslashes leaves the rule escaping
+  nothing, so `foo\` ignores nothing while `foo\\` matches a file named `foo\`
 - a globstar is **any run of two or more asterisks** — `***` is `**`, not a
   globstar followed by a stray star
 
@@ -307,6 +314,12 @@ This subset is checked against real `git check-ignore`
 than promised. The character-class and globstar cases there were found by
 fuzzing patterns against git, after the class compiler proved to be the one
 token in the language that matched the path separator when nothing else did.
+
+Names are asked about with a `./` prefix in those tests. A name beginning with
+`:`, `*`, `?` or `[` is git **pathspec magic**: handed over verbatim,
+`check-ignore` answers about a pattern rather than a file and reports "no match"
+for a file it can plainly see. Without the prefix the harness manufactures
+disagreements that no user of textclean could ever hit.
 
 ---
 
@@ -446,7 +459,7 @@ DEFAULTS.skipCodeFences; // null = auto (on for .md/.markdown)
 ## Development
 
 ```bash
-node --test        # 174 tests, no install needed
+node --test        # 178 tests, no install needed
 ```
 
 Tested on Node 20, 22, and 24 (`.github/workflows/ci.yml`). The suite covers

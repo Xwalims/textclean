@@ -46,12 +46,55 @@ function compilePattern(line, gitignoreDir) {
   }
   if (pattern === '') return null;
 
+  // A trailing run of backslashes of ODD length leaves the rule escaping a
+  // character that is not there, and git then ignores nothing with it.
+  //
+  // Measured with `git check-ignore`, one file per candidate name:
+  //
+  //     foo    -> matches "foo"
+  //     foo\   -> matches nothing
+  //     foo\\  -> matches "foo\"
+  //     foo\\\ -> matches nothing
+  //     foo\\\\-> matches "foo\\"
+  //
+  // So the run is literal backslashes while it is even, and a dangling escape
+  // while it is odd. The old code fell through to `body += '\\$'` and compiled
+  // `foo\` as a pattern needing a literal backslash at the end of every match,
+  // so it ignored a file named `foo\` -- one that git leaves alone.
+  //
+  // This is checked BEFORE the trailing-slash and trailing-space handling,
+  // because an inert rule needs no further interpretation.
+  if (trailingBackslashRunIsOdd(pattern)) return null;
+
   // Decide anchoring BEFORE compiling, then drop the leading '/'. Compiling
   // first would bake the '/' into the body and produce a regex like '^^/name$'
   // that can never match a relative path — every anchored pattern would
   // silently stop working.
   const anchored = pattern.startsWith('/') || pattern.slice(0, -1).includes('/');
   pattern = pattern.replace(/^\/+/, '');
+  if (pattern === '') return null;
+
+  // Strip UNESCAPED trailing spaces, git's rule and this file's missing one.
+  //
+  // `parseGitignore` used `.trimEnd()` on every line, which is right about the
+  // common case and wrong about the escaped one. A trailing space run is literal
+  // only when an ODD number of backslashes immediately precedes it -- that is
+  // exactly git's rule, measured with `git check-ignore`:
+  //
+  //     foo\        ->  nothing (a trailing backslash escapes nothing)
+  //     foo\  ' '   ->  `foo `      (odd run: the space is the name)
+  //     foo\    ' ' ->  `foo `      (the rest of the run is then stripped)
+  //     foo   ' '   ->  `foo`       (no backslash: stripped)
+  //
+  // So `.trimEnd()` deleted the very character `foo\ ` exists to preserve: the
+  // rule stopped matching `foo ` and matched `foo` instead, silently ignoring a
+  // different file than the one named. A file whose name ends in a space is
+  // legal on every POSIX filesystem and does happen in the wild.
+  //
+  // Tabs are NOT stripped: git ignores only the space character here, and a
+  // trailing tab is part of the name (measured: the rule `foo\t` matches a file
+  // literally named `foo<TAB>` and nothing else).
+  pattern = stripTrailingSpaces(pattern);
   if (pattern === '') return null;
 
   // Patterns from a nested .gitignore resolve relative to its own directory.
@@ -112,9 +155,21 @@ function compilePattern(line, gitignoreDir) {
         i = close + 1;
         continue;
       }
-      body += '\\[';
-      i += 1;
-      continue;
+      // An unterminated `[` makes the WHOLE RULE inert in git, not just the
+      // class. Measured with `git check-ignore`:
+      //
+      //     [abc    -> matches nothing
+      //     a[bc    -> matches nothing      (the leading `a` does not save it)
+      //     x*[bc   -> matches nothing      (neither does a leading glob)
+      //     a[bc d  -> matches nothing
+      //     [bc]x   -> matches nothing      (a closed class followed by text)
+      //
+      // So this file used to fall through to `body += '\\['` and compile the
+      // rest literally, which is the one reading git does not have: the rule
+      // `x[abc` fired on a file named `x[abc`, a file no git user could produce
+      // with that rule. Ignoring the wrong file is the expensive direction --
+      // textclean would rewrite source it was asked to leave alone.
+      return null;
     }
     if (ch === '\\' && i + 1 < pattern.length) {
       body += pattern[i + 1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -147,6 +202,63 @@ function compilePattern(line, gitignoreDir) {
 
 function escapeRe(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Does `pattern` end with an odd-length run of backslashes?
+ *
+ * An even run is a literal tail; an odd one is a dangling escape that leaves the
+ * rule inert in git. Measured, not assumed: `foo\\` matches the file `foo\`,
+ * `foo\\` (one backslash, written `foo\\` in JS source) matches nothing, and
+ * `foo\\\\` matches `foo\\`.
+ *
+ * @param {string} pattern the pattern body, after any leading `!` has been
+ *   removed.
+ * @returns {boolean} true when the trailing backslash run has odd length.
+ */
+function trailingBackslashRunIsOdd(pattern) {
+  let i = pattern.length;
+  while (i > 0 && pattern[i - 1] === '\\') i -= 1;
+  return (pattern.length - i) % 2 === 1;
+}
+
+/**
+ * Strip a trailing run of spaces unless an escaped one is part of the name.
+ *
+ * git keeps a trailing space literal only when it is escaped by an ODD number
+ * of immediately preceding backslashes, and then strips whatever spaces follow
+ * it. Measured with `git check-ignore`, every line below being a full rule:
+ *
+ *     "foo"      -> matches "foo"
+ *     "foo   "   -> matches "foo"       (run stripped)
+ *     "foo\\ "   -> matches "foo "      (odd backslash run: one space kept)
+ *     "foo\\  "  -> matches "foo "
+ *     "foo\\   " -> matches "foo "      (rest of the run still stripped)
+ *
+ * Only the space character is considered; a trailing tab belongs to the name.
+ *
+ * @param {string} line pattern body, already stripped of any leading `!`, `/`
+ *   and trailing `/`.
+ * @returns {string} the pattern with unescaped trailing spaces removed.
+ */
+function stripTrailingSpaces(line) {
+  let end = line.length;
+  while (end > 0 && line[end - 1] === ' ') end -= 1;
+  if (end === line.length) return line;
+  // Walk back over the backslashes in front of the run; an odd count escapes
+  // the first space of it, so exactly one space survives.
+  let i = end - 1;
+  let backslashes = 0;
+  while (i >= 0 && line[i] === '\\') {
+    backslashes += 1;
+    i -= 1;
+  }
+  if (backslashes % 2 === 1) {
+    // Keep one space, and keep the backslashes that are still escaping things.
+    // `foo\ ` -> `foo\ `; `foo\   ` -> `foo\ `.
+    return line.slice(0, end) + ' ';
+  }
+  return line.slice(0, end);
 }
 
 /** The slash itself. */
@@ -302,7 +414,20 @@ function parseClassBody(body) {
  */
 function compileClass(body) {
   const { negated, ranges } = parseClassBody(body);
-  const member = (ch) => (ch === '/' ? '\\/' : escapeRe(ch));
+  // A dash MUST be escaped in the negated branch, exactly as it is in the
+  // positive one below.
+  //
+  // The negated branch enumerates every excluded member and pastes them in, so
+  // `[!-z]` became the fragment `[^/-z]` -- and in RegExp that is not "not a
+  // slash, not a dash, not a z". It is a RANGE: `/` (0x2f) through `z` (0x7a).
+  // The class matched 17 characters instead of 92, so `[!-z]` ignored punctuation
+  // and digits and nothing else, while git matches everything except `-` and `z`.
+  // Measured with `git check-ignore` over a file per printable ASCII character:
+  // git matches 90, this matched 17, 75 of them wrong. The same class of bug
+  // reaches any negated class holding a dash member, `[^-z]` included.
+  //
+  // Escaping is free: `\ -` means the same character as `-` inside a class.
+  const member = (ch) => (ch === '/' ? '\\/' : ch === '-' ? '\\-' : escapeRe(ch));
 
   if (negated) {
     // Enumerate the excluded set so the fragment can start from a guaranteed
@@ -380,8 +505,10 @@ function loadGitignore(dir, file = '.gitignore', root = dir) {
 function parseGitignore(text, relativeDir = '') {
   const out = [];
   for (const rawLine of text.split('\n')) {
-    const line = rawLine.replace(/\r$/, '').trimEnd();
-    if (line === '' || line.startsWith('#')) continue;
+    // Strip the CR of a CRLF file, and nothing else. The trailing-space rule is
+    // applied inside compilePattern, which is where the escapes are read.
+    const line = rawLine.replace(/\r$/, '');
+    if (line.trim() === '' || line.startsWith('#')) continue;
     const compiled = compilePattern(line, relativeDir);
     if (compiled) out.push(compiled);
   }

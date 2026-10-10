@@ -239,8 +239,11 @@ const CLASS_CASES = [
   { pattern: '[\\a]', matches: ['a'], misses: ['b'] },
   { pattern: '[a\\b]', matches: ['a', 'b'], misses: ['c'] },
 
-  // An unterminated class is literal text and matches nothing here.
-  { pattern: '[a', matches: [], misses: ['a', 'b'] },
+  // An unterminated class makes the whole rule inert, so it compiles to NO
+  // rule at all rather than to a live one that matches nothing. Measured with
+  // `git check-ignore`: `[abc`, `a[bc` and `x*[bc` all ignore nothing, and a
+  // leading literal or glob does not rescue them.
+  { pattern: '[a', matches: [], misses: ['a', 'b'], noRule: true },
 
   // A class never matches the path separator, even when it contains one.
   // A range that spans the slash keeps its other members.
@@ -304,6 +307,18 @@ test('character classes agree with git', () => {
     try {
       const truth = new Set(out.split('\0').filter(Boolean));
       const rules = parseGitignore(c.pattern, '');
+      if (c.noRule) {
+        // git leaves such a rule inert, so textclean must not compile a live
+        // one that matches nothing -- the two differ on every subsequent rule
+        // in the file, and only a live-but-empty rule would silently disagree.
+        assert.equal(
+          rules.length,
+          0,
+          `${c.pattern}: expected no rule, since git ignores nothing with it`,
+        );
+        assert.equal(truth.size, 0, `${c.pattern}: git is expected to match nothing`);
+        continue;
+      }
       assert.equal(rules.length, 1, `${c.pattern}: expected one rule`);
       for (const n of askable) {
         const expected = truth.has(n);
@@ -384,4 +399,155 @@ test('a globstar is any run of two or more asterisks', () => {
 test('git is actually available, otherwise every case above is vacuous', () => {
   const out = execFileSync('git', ['--version'], { encoding: 'utf8' });
   assert.match(out, /git version/);
+});
+
+/**
+ * A single `.gitignore` line checked against real git over a fixed set of file
+ * names. Names are asked about with a `./` prefix, because a name beginning
+ * with `:`, `*`, `?` or `[` is git PATHSPEC MAGIC -- handed over verbatim,
+ * check-ignore answers about a pattern rather than a file and reports "no
+ * match" for a file it can plainly see, which reads as a disagreement that does
+ * not exist. The canary below proves the harness can answer about every name
+ * used before any verdict is drawn from it.
+ */
+function askGit(pattern, names) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'textclean-rule-'));
+  const git = (args) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    fs.writeFileSync(path.join(dir, '.gitignore'), pattern + '\n');
+    for (const n of names) {
+      const full = path.join(dir, n);
+      if (fs.existsSync(full)) continue;
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, 'x');
+    }
+    git(['init', '-q']);
+    git(['config', 'user.email', 'test@example.invalid']);
+    git(['config', 'user.name', 'test']);
+    const res = spawnSync('git', ['check-ignore', '-z', '--stdin', '--no-index'], {
+      cwd: dir,
+      input: names.map((n) => `./${n}`).join('\0') + '\0',
+      encoding: 'utf8',
+    });
+    if (res.status !== 0 && res.status !== 1) {
+      throw new Error(`git check-ignore failed (${res.status}): ${res.stderr}`);
+    }
+    return new Set(
+      (res.stdout || '').split('\0').filter(Boolean).map((s) => s.replace(/^\.\//, '')),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Every printable ASCII character that can legally be a path component. */
+const SINGLE_CHARS = (() => {
+  const out = [];
+  for (let c = 0x21; c <= 0x7e; c += 1) {
+    const ch = String.fromCharCode(c);
+    if (ch === '/' || ch === '.') continue; // separator, and the directory itself
+    out.push(ch);
+  }
+  return out;
+})();
+
+test('a negated class containing a dash agrees with git over every character', () => {
+  // The compiler emitted `[^/-z]` for `[!-z]`, which RegExp reads as a RANGE
+  // from `/` (0x2f) to `z` (0x7a): the class then matched 17 characters where
+  // git matches 90. Over a file per printable ASCII character that put 75
+  // verdicts wrong, and all of them in the dangerous direction -- a rule that
+  // ignored nothing it was meant to ignore.
+  const canary = askGit('*\n', SINGLE_CHARS);
+  assert.equal(
+    canary.size,
+    SINGLE_CHARS.length,
+    'the harness could not ask git about every name, so nothing here is proven',
+  );
+
+  for (const pattern of ['[!-z]', '[^-z]', '[!-a]', '[!-]', '[!a]', '[!a-z]', '[!0-9a-z]']) {
+    const truth = askGit(pattern, SINGLE_CHARS);
+    const rules = parseGitignore(pattern, '');
+    assert.equal(rules.length, 1, `${pattern}: expected one rule`);
+    for (const n of SINGLE_CHARS) {
+      assert.equal(
+        rules[0].regex.test(n),
+        truth.has(n),
+        `${pattern} vs ${JSON.stringify(n)}: git ${truth.has(n) ? 'ignores' : 'keeps'} it`,
+      );
+    }
+  }
+});
+
+test('an escaped trailing space is part of the name, and only one of them', () => {
+  // `.trimEnd()` used to strip the space `foo\ ` exists to preserve, so the
+  // rule matched `foo` and left `foo ` alone. Measured with `git check-ignore`:
+  // `foo\ `, `foo\  ` and `foo\   ` all match `foo `, while a bare `foo   `
+  // matches `foo`.
+  const names = ['foo', 'foo ', 'foo  ', 'foo   '];
+  const canary = askGit('*\n', names);
+  assert.equal(canary.size, names.length, 'the harness could not ask git about every name');
+
+  for (const pattern of ['foo\\ ', 'foo\\  ', 'foo\\   ', 'foo   ', 'foo ']) {
+    const truth = askGit(pattern, names);
+    const rules = parseGitignore(pattern, '');
+    assert.equal(rules.length, 1, `${JSON.stringify(pattern)}: expected one rule`);
+    for (const n of names) {
+      assert.equal(
+        rules[0].regex.test(n),
+        truth.has(n),
+        `${JSON.stringify(pattern)} vs ${JSON.stringify(n)}: ` +
+          `git ${truth.has(n) ? 'ignores' : 'keeps'} it`,
+      );
+    }
+  }
+});
+
+test('a rule left inert by a dangling escape ignores nothing, like git', () => {
+  // An odd trailing backslash run escapes a character that is not there, and
+  // git then ignores nothing with the rule; an even run is literal.
+  const names = ['foo', 'foo\\', 'foo\\\\'];
+  const canary = askGit('*\n', names);
+  assert.equal(canary.size, names.length, 'the harness could not ask git about every name');
+
+  for (const pattern of ['foo\\', 'foo\\\\', 'foo\\\\\\']) {
+    const truth = askGit(pattern, names);
+    const rules = parseGitignore(pattern, '');
+    if (truth.size === 0) {
+      assert.equal(
+        rules.length,
+        0,
+        `${JSON.stringify(pattern)}: git ignores nothing with it, so it must compile to no rule`,
+      );
+      continue;
+    }
+    assert.equal(rules.length, 1, `${JSON.stringify(pattern)}: expected one rule`);
+    for (const n of names) {
+      assert.equal(
+        rules[0].regex.test(n),
+        truth.has(n),
+        `${JSON.stringify(pattern)} vs ${JSON.stringify(n)}: ` +
+          `git ${truth.has(n) ? 'ignores' : 'keeps'} it`,
+      );
+    }
+  }
+});
+
+test('an unterminated class kills the whole rule, not just the class', () => {
+  // git ignores nothing with `[abc`, and a leading literal or glob does not
+  // rescue it. The old compiler treated the `[` as literal text, so `x[abc`
+  // fired on a file named `x[abc` -- ignoring a file git would have kept.
+  const names = ['[abc', 'a[bc', 'x[abc', 'a', 'x', 'xay'];
+  const canary = askGit('*\n', names);
+  assert.equal(canary.size, names.length, 'the harness could not ask git about every name');
+
+  for (const pattern of ['[abc', 'a[bc', 'x[abc', '[a', 'x*[bc']) {
+    const truth = askGit(pattern, names);
+    assert.equal(truth.size, 0, `${pattern}: git is expected to ignore nothing`);
+    assert.equal(
+      parseGitignore(pattern, '').length,
+      0,
+      `${pattern}: an inert rule must not compile to a live one`,
+    );
+  }
 });
